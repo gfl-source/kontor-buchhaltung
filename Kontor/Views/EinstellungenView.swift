@@ -41,6 +41,8 @@ struct EinstellungenView: View {
 }
 
 private struct EinstellungenForm: View {
+    private static let integritaetsPruefer = BelegIntegritaetsPruefer()
+
     @Environment(\.modelContext) private var context
     @Environment(MCPServer.self) private var mcp
     @Bindable var settings: YearSettings
@@ -49,6 +51,8 @@ private struct EinstellungenForm: View {
     @State private var selbsttestErgebnis: String?
     @State private var integritaetsBericht: IntegritaetsBericht?
     @State private var integritaetsFehler: String?
+    @State private var integritaetsPruefungLaeuft = false
+    @State private var integritaetsLaufID = UUID()
     @AppStorage("budgetLebensmittelWoche") private var budgetWoche = 50.0
     @AppStorage("budgetAnschaffungenMonat") private var budgetMonat = 80.0
     @AppStorage("sidebarOpak") private var sidebarOpak = false
@@ -171,6 +175,11 @@ private struct EinstellungenForm: View {
                     pruefeBelegIntegritaet()
                 } label: {
                     Label("Integritätsreport erstellen", systemImage: "checklist")
+                }
+                .disabled(integritaetsPruefungLaeuft)
+                if integritaetsPruefungLaeuft {
+                    ProgressView("Prüfe Belegbestand …")
+                        .font(.caption)
                 }
 
                 if let bericht = integritaetsBericht {
@@ -373,13 +382,37 @@ private struct EinstellungenForm: View {
     }
 
     private func pruefeBelegIntegritaet() {
-        do {
-            integritaetsBericht = try BelegIntegritaet.bericht(context)
-            integritaetsFehler = nil
-        } catch {
-            integritaetsBericht = nil
-            integritaetsFehler = "Prüfung fehlgeschlagen: \(error.localizedDescription)"
-            NSSound.beep()
+        let laufID = UUID()
+        integritaetsLaufID = laufID
+        integritaetsPruefungLaeuft = true
+        integritaetsFehler = nil
+        let container = context.container
+
+        Task(priority: .userInitiated) {
+            do {
+                let bericht = try await Self.integritaetsPruefer.pruefe(container: container)
+                await MainActor.run {
+                    guard integritaetsLaufID == laufID else { return }
+                    integritaetsBericht = bericht
+                    integritaetsFehler = nil
+                    integritaetsPruefungLaeuft = false
+                }
+            } catch {
+                await MainActor.run {
+                    guard integritaetsLaufID == laufID else { return }
+                    integritaetsBericht = nil
+                    integritaetsFehler = "Prüfung fehlgeschlagen: \(error.localizedDescription)"
+                    integritaetsPruefungLaeuft = false
+                    NSSound.beep()
+                }
+            }
+        }
+
+        private actor BelegIntegritaetsPruefer {
+            func pruefe(container: ModelContainer) throws -> IntegritaetsBericht {
+                let hintergrundKontext = ModelContext(container)
+                return try BelegIntegritaet.bericht(hintergrundKontext)
+            }
         }
     }
 }

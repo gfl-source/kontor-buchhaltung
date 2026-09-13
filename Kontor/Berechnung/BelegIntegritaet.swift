@@ -19,7 +19,7 @@ struct IntegritaetsBericht: Hashable {
 enum BelegIntegritaet {
     static func bericht(_ context: ModelContext) throws -> IntegritaetsBericht {
         let referenzen = try referenzen(context)
-        let dateien = Set(dateienImBelegeOrdner())
+        let dateien = Set(try dateienImBelegeOrdner())
         let referenzPfade = Set(referenzen.map(\.pfad))
 
         let fehlende = referenzen
@@ -39,30 +39,39 @@ enum BelegIntegritaet {
     }
 
     private static func referenzen(_ context: ModelContext) throws -> [FehlenderBeleg] {
-        var alle: [FehlenderBeleg] = []
-
-        let ausgaben = try context.fetch(FetchDescriptor<ExpenseEntry>())
-        alle.append(
-            contentsOf: ausgaben.compactMap { eintrag in
-                guard let pfad = belegPfad(eintrag.belegPfad) else { return nil }
-                return FehlenderBeleg(typ: "Ausgabe", bezeichnung: eintrag.bezeichnung, pfad: pfad)
-            })
-
-        let einnahmen = try context.fetch(FetchDescriptor<Income>())
-        alle.append(
-            contentsOf: einnahmen.compactMap { eintrag in
-                guard let pfad = belegPfad(eintrag.belegPfad) else { return nil }
-                return FehlenderBeleg(typ: "Einnahme", bezeichnung: eintrag.kunde, pfad: pfad)
-            })
-
-        let anschaffungen = try context.fetch(FetchDescriptor<PurchaseEntry>())
-        alle.append(
-            contentsOf: anschaffungen.compactMap { eintrag in
-                guard let pfad = belegPfad(eintrag.belegPfad) else { return nil }
-                return FehlenderBeleg(typ: "Anschaffung", bezeichnung: eintrag.bezeichnung, pfad: pfad)
-            })
-
-        return alle
+        try referenzen(
+            context,
+            descriptor: FetchDescriptor<ExpenseEntry>(
+                predicate: #Predicate<ExpenseEntry> { eintrag in
+                    if let pfad = eintrag.belegPfad { return !pfad.isEmpty }
+                    return false
+                }),
+            typ: "Ausgabe",
+            bezeichnung: \.bezeichnung,
+            pfad: \.belegPfad
+        )
+            + referenzen(
+                context,
+                descriptor: FetchDescriptor<Income>(
+                    predicate: #Predicate<Income> { eintrag in
+                        if let pfad = eintrag.belegPfad { return !pfad.isEmpty }
+                        return false
+                    }),
+                typ: "Einnahme",
+                bezeichnung: \.kunde,
+                pfad: \.belegPfad
+            )
+            + referenzen(
+                context,
+                descriptor: FetchDescriptor<PurchaseEntry>(
+                    predicate: #Predicate<PurchaseEntry> { eintrag in
+                        if let pfad = eintrag.belegPfad { return !pfad.isEmpty }
+                        return false
+                    }),
+                typ: "Anschaffung",
+                bezeichnung: \.bezeichnung,
+                pfad: \.belegPfad
+            )
     }
 
     private static func belegPfad(_ pfad: String?) -> String? {
@@ -70,20 +79,31 @@ enum BelegIntegritaet {
         return pfad
     }
 
-    private static func dateienImBelegeOrdner() -> [String] {
+    private static func referenzen<T: PersistentModel>(
+        _ context: ModelContext,
+        descriptor: FetchDescriptor<T>,
+        typ: String,
+        bezeichnung: KeyPath<T, String>,
+        pfad: KeyPath<T, String?>
+    ) throws -> [FehlenderBeleg] {
+        try context.fetch(descriptor).compactMap { eintrag in
+            guard let pfad = belegPfad(eintrag[keyPath: pfad]) else { return nil }
+            return FehlenderBeleg(typ: typ, bezeichnung: eintrag[keyPath: bezeichnung], pfad: pfad)
+        }
+    }
+
+    private static func dateienImBelegeOrdner() throws -> [String] {
         let basis = Belege.basis.standardizedFileURL
         let fm = FileManager.default
-        guard let en = fm.enumerator(at: basis, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
-
-        let basisPfad = basis.path.hasSuffix("/") ? basis.path : basis.path + "/"
+        var istOrdner = ObjCBool(false)
+        guard fm.fileExists(atPath: basis.path, isDirectory: &istOrdner), istOrdner.boolValue else { return [] }
+        let unterpfade = try fm.subpathsOfDirectory(atPath: basis.path)
         var dateien: [String] = []
-        for case let datei as URL in en {
-            guard (try? datei.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
-            let pfad = datei.standardizedFileURL.path
-            guard pfad.hasPrefix(basisPfad) else { continue }
-            let relativ = String(pfad.dropFirst(basisPfad.count))
-            guard !relativ.isEmpty else { continue }
-            dateien.append(relativ.replacingOccurrences(of: "\\", with: "/"))
+        for unterpfad in unterpfade {
+            var istOrdner = ObjCBool(false)
+            let url = basis.appendingPathComponent(unterpfad)
+            guard fm.fileExists(atPath: url.path, isDirectory: &istOrdner), !istOrdner.boolValue else { continue }
+            dateien.append(unterpfad.replacingOccurrences(of: "\\", with: "/"))
         }
         return dateien.sorted()
     }

@@ -4,6 +4,29 @@ import Testing
 @testable import Kontor
 
 struct BelegIntegritaetTests {
+    @Test func alleBelegfuehrendenEntitaetenWerdenGeprueft() throws {
+        try mitTemporaerenBelegen { _ in
+            let ctx = try testKontext()
+            ctx.insert(
+                ExpenseEntry(
+                    datum: tag(2026, 1, 1), bezeichnung: "Ausgabe A", anbieter: "A",
+                    brutto: dez("10"), vst: 0, steuerart: .steuerfrei,
+                    belegPfad: "2026/ausgabe-fehlt.pdf"))
+            ctx.insert(
+                Income(
+                    kunde: "Kunde A", rnNetto: dez("10"), ust: dez("1.9"),
+                    rechnungsdatum: tag(2026, 1, 2), belegPfad: "2026/einnahme-fehlt.pdf"))
+            ctx.insert(
+                PurchaseEntry(
+                    datum: tag(2026, 1, 3), bezeichnung: "Anschaffung A", preis: dez("10"),
+                    belegPfad: "2026/anschaffung-fehlt.pdf"))
+
+            let bericht = try BelegIntegritaet.bericht(ctx)
+            #expect(Set(bericht.fehlendeBelege.map(\.typ)) == ["Ausgabe", "Einnahme", "Anschaffung"])
+            #expect(bericht.fehlendeBelege.count == 3)
+        }
+    }
+
     @Test func fehlendeBelegeWerdenErkannt() throws {
         try mitTemporaerenBelegen { _ in
             let ctx = try testKontext()
