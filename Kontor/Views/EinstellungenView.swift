@@ -41,12 +41,18 @@ struct EinstellungenView: View {
 }
 
 private struct EinstellungenForm: View {
+    private static let integritaetsPruefer = BelegIntegritaetsPruefer()
+
     @Environment(\.modelContext) private var context
     @Environment(MCPServer.self) private var mcp
     @Bindable var settings: YearSettings
     @State private var status: String?
     @State private var selbsttestLaeuft = false
     @State private var selbsttestErgebnis: String?
+    @State private var integritaetsBericht: IntegritaetsBericht?
+    @State private var integritaetsFehler: String?
+    @State private var integritaetsPruefungLaeuft = false
+    @State private var integritaetsLaufID = UUID()
     @AppStorage("budgetLebensmittelWoche") private var budgetWoche = 50.0
     @AppStorage("budgetAnschaffungenMonat") private var budgetMonat = 80.0
     @AppStorage("sidebarOpak") private var sidebarOpak = false
@@ -162,6 +168,53 @@ private struct EinstellungenForm: View {
                     "Beim Start wird automatisch ein tägliches Backup angelegt (JSON, letzte 14 Tage). Hinweis: Auto-Backups enthalten keine Beleg-Dateien – dafür das Komplett-Backup nutzen."
                 )
                 .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Beleg-Integrität") {
+                Button {
+                    pruefeBelegIntegritaet()
+                } label: {
+                    Label("Integritätsreport erstellen", systemImage: "checklist")
+                }
+                .disabled(integritaetsPruefungLaeuft)
+                if integritaetsPruefungLaeuft {
+                    ProgressView("Prüfe Belegbestand …")
+                        .font(.caption)
+                }
+
+                if let bericht = integritaetsBericht {
+                    if bericht.istLeer {
+                        Label("Alles in Ordnung: keine fehlenden oder verwaisten Belege.", systemImage: "checkmark.seal")
+                            .foregroundStyle(Stil.positiv)
+                    } else {
+                        if !bericht.fehlendeBelege.isEmpty {
+                            Text("Fehlende Belege (\(bericht.fehlendeBelege.count))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ForEach(bericht.fehlendeBelege) { beleg in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(beleg.typ): \(beleg.bezeichnung)")
+                                    Text(beleg.pfad).font(.caption.monospaced()).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+
+                        if !bericht.verwaisteDateien.isEmpty {
+                            Text("Verwaiste Dateien (\(bericht.verwaisteDateien.count))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ForEach(bericht.verwaisteDateien, id: \.self) { pfad in
+                                Text(pfad).font(.caption.monospaced())
+                            }
+                        }
+                    }
+                }
+
+                if let integritaetsFehler {
+                    Label(integritaetsFehler, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+
+                Text("Prüft, ob gespeicherte Belegpfade auf vorhandene Dateien zeigen und ob Dateien ohne Referenz im Belege-Ordner liegen.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("KI-Zugriff (MCP)") {
@@ -326,5 +379,40 @@ private struct EinstellungenForm: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func pruefeBelegIntegritaet() {
+        let laufID = UUID()
+        integritaetsLaufID = laufID
+        integritaetsPruefungLaeuft = true
+        integritaetsFehler = nil
+        let container = context.container
+
+        Task(priority: .userInitiated) {
+            do {
+                let bericht = try await Self.integritaetsPruefer.pruefe(container: container)
+                await MainActor.run {
+                    guard integritaetsLaufID == laufID else { return }
+                    integritaetsBericht = bericht
+                    integritaetsFehler = nil
+                    integritaetsPruefungLaeuft = false
+                }
+            } catch {
+                await MainActor.run {
+                    guard integritaetsLaufID == laufID else { return }
+                    integritaetsBericht = nil
+                    integritaetsFehler = "Prüfung fehlgeschlagen: \(error.localizedDescription)"
+                    integritaetsPruefungLaeuft = false
+                    NSSound.beep()
+                }
+            }
+        }
+
+        private actor BelegIntegritaetsPruefer {
+            func pruefe(container: ModelContainer) throws -> IntegritaetsBericht {
+                let hintergrundKontext = ModelContext(container)
+                return try BelegIntegritaet.bericht(hintergrundKontext)
+            }
+        }
     }
 }
